@@ -167,6 +167,13 @@ async def scrape_kufar(session: aiohttp.ClientSession, max_pages: int = 3) -> li
 
             link = ad.get("ad_link", DETAIL_URL.format(ad_id=ad_id))
 
+            # Photos
+            photos = []
+            for img in ad.get("images", [])[:5]:
+                path = img.get("path", "")
+                if path:
+                    photos.append(f"https://rms.kufar.by/v1/list_thumbs_2x/{path}")
+
             apt = Apartment(
                 source="kufar",
                 external_id=ad_id,
@@ -184,6 +191,7 @@ async def scrape_kufar(session: aiohttp.ClientSession, max_pages: int = 3) -> li
                 lat=lat,
                 lon=lon,
                 description=body_short,
+                photos=photos,
             )
             apartments.append(apt)
 

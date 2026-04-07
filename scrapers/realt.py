@@ -147,6 +147,14 @@ async def _fetch_detail(session: aiohttp.ClientSession, code: str) -> Apartment 
 
     updated_at = obj.get("updatedAt") or obj.get("createdAt", "")
 
+    # Photos
+    photos = []
+    for slide in (obj.get("slides") or [])[:5]:
+        if isinstance(slide, str):
+            photos.append(slide)
+        elif isinstance(slide, dict) and slide.get("url"):
+            photos.append(slide["url"])
+
     return Apartment(
         source="realt",
         external_id=str(code),
@@ -164,6 +172,7 @@ async def _fetch_detail(session: aiohttp.ClientSession, code: str) -> Apartment 
         lat=lat,
         lon=lon,
         description=clean_desc[:500] if clean_desc else None,
+        photos=photos,
     )
 
 

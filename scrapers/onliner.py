@@ -138,6 +138,10 @@ async def scrape_onliner(session: aiohttp.ClientSession, max_pages: int = 3) -> 
             url = item.get("url", f"https://r.onliner.by/ak/apartments/{apt_id}")
             updated_at = item.get("last_time_up") or item.get("created_at", "")
 
+            # Photo (single thumbnail from list API)
+            photo = item.get("photo")
+            photos = [photo] if photo else []
+
             apt = Apartment(
                 source="onliner",
                 external_id=apt_id,
@@ -154,6 +158,7 @@ async def scrape_onliner(session: aiohttp.ClientSession, max_pages: int = 3) -> 
                 updated_at=updated_at,
                 lat=lat,
                 lon=lon,
+                photos=photos,
             )
             apartments.append(apt)
 

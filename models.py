@@ -1,5 +1,8 @@
 from dataclasses import dataclass, field
+from datetime import datetime, timezone, timedelta
 from typing import Optional
+
+MINSK_TZ = timezone(timedelta(hours=3))
 
 
 @dataclass
@@ -20,6 +23,7 @@ class Apartment:
     lat: Optional[float] = None
     lon: Optional[float] = None
     description: Optional[str] = None
+    photos: list[str] = field(default_factory=list)
 
     @property
     def unique_key(self) -> str:
@@ -30,6 +34,20 @@ class Apartment:
         if self.lat and self.lon:
             return f"https://yandex.by/maps/?pt={self.lon},{self.lat}&z=16&l=map"
         return None
+
+    @property
+    def updated_at_formatted(self) -> str:
+        if not self.updated_at:
+            return "н/д"
+        for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                dt = datetime.strptime(self.updated_at, fmt)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=MINSK_TZ)
+                return dt.astimezone(MINSK_TZ).strftime("%d.%m.%Y %H:%M")
+            except ValueError:
+                continue
+        return self.updated_at
 
     def format_message(self) -> str:
         price_parts = []
@@ -58,7 +76,7 @@ class Apartment:
             f"💰 Цена: {price_str}\n"
             f"📐 Площадь: {self.area or 'н/д'} м²\n"
             f"📍 Адрес: {address_str}{district_line}\n"
-            f"🕐 Обновлено: {self.updated_at or 'н/д'}\n"
+            f"🕐 Обновлено: {self.updated_at_formatted}\n"
             f"🍽 Посудомойка: {dishwasher}\n"
             f"\n🔗 <a href=\"{self.url}\">Открыть объявление</a>"
         )

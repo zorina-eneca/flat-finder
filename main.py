@@ -4,7 +4,7 @@ import os
 import sys
 
 from dotenv import load_dotenv
-from telegram import Update
+from telegram import InputMediaPhoto, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -46,41 +46,59 @@ async def send_results(app: Application):
 
     for apt in apartments:
         try:
-            await app.bot.send_message(
-                chat_id=CHAT_ID,
-                text=apt.format_message(),
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-            await asyncio.sleep(0.5)  # Respect rate limits
+            await _send_apartment(app.bot, CHAT_ID, apt)
+            await asyncio.sleep(0.5)
         except Exception as e:
             logger.error("Failed to send message: %s", e)
 
 
+async def _send_apartment(bot, chat_id, apt):
+    """Send one apartment: photos (if any) + text."""
+    if apt.photos:
+        media = []
+        for i, url in enumerate(apt.photos[:5]):
+            if i == 0:
+                media.append(InputMediaPhoto(media=url, caption=apt.format_message(), parse_mode="HTML"))
+            else:
+                media.append(InputMediaPhoto(media=url))
+        try:
+            await bot.send_media_group(chat_id=chat_id, media=media)
+            return
+        except Exception:
+            # Fallback to text if photos fail
+            pass
+
+    await bot.send_message(
+        chat_id=chat_id,
+        text=apt.format_message(),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+
+
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manual scan trigger."""
-    await update.message.reply_text("🔍 Запускаю сканирование...")
+    chat_id = update.effective_chat.id
+    await context.bot.send_message(chat_id=chat_id, text="🔍 Запускаю сканирование...")
     try:
         apartments = await run_scan()
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}")
+        await context.bot.send_message(chat_id=chat_id, text=f"❌ Ошибка: {e}")
         return
 
     if not apartments:
-        await update.message.reply_text("Новых подходящих квартир не найдено.")
+        await context.bot.send_message(chat_id=chat_id, text="Новых подходящих квартир не найдено.")
         return
 
-    await update.message.reply_text(f"Найдено {len(apartments)} квартир:")
+    await context.bot.send_message(chat_id=chat_id, text=f"Найдено {len(apartments)} квартир:")
     for apt in apartments:
         try:
-            await update.message.reply_text(
-                apt.format_message(),
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
+            await _send_apartment(context.bot, chat_id, apt)
             await asyncio.sleep(0.5)
         except Exception as e:
             logger.error("Failed to send: %s", e)
+
+    await context.bot.send_message(chat_id=chat_id, text="✅ Сканирование завершено.")
 
 
 async def cmd_clear_seen(update: Update, context: ContextTypes.DEFAULT_TYPE):
