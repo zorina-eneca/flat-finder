@@ -78,5 +78,5 @@ class Apartment:
             f"📍 Адрес: {address_str}{district_line}\n"
             f"🕐 Обновлено: {self.updated_at_formatted}\n"
             f"🍽 Посудомойка: {dishwasher}\n"
-            f"\n🔗 <a href=\"{self.url}\">Открыть объявление</a>"
+            f"\n🔗 {self.source.capitalize()}: <a href=\"{self.url}\">Открыть объявление</a>"
         )

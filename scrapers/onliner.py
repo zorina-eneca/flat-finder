@@ -1,12 +1,11 @@
 import logging
 import re
 import json
-from typing import Optional
 
 import aiohttp
-from bs4 import BeautifulSoup
 
 from models import Apartment
+from scrapers.common import check_pets_in_text, check_dishwasher_in_text
 
 logger = logging.getLogger(__name__)
 
@@ -22,43 +21,53 @@ BOUNDS = {
 
 RENT_TYPE_MAP = {1: "1_room", 2: "2_rooms", 3: "3_rooms", 4: "4_rooms"}
 
-PET_KEYWORDS = [
-    "без животных", "без питомцев", "без домашних животных",
-    "животные не допускаются", "без котов", "без кошек", "без собак",
-]
-
 
 async def _fetch_detail(session: aiohttp.ClientSession, url: str) -> dict:
     """Fetch detail page and extract area, description, dishwasher info."""
     result = {"area": None, "description": None, "has_dishwasher": None, "has_pet_restriction": None}
     try:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-            logger.info("Onliner detail %s returned %d", url, resp.status)
             if resp.status != 200:
+                logger.warning("Onliner detail %s returned %d", url, resp.status)
                 return result
             html = await resp.text()
     except Exception as e:
         logger.warning("Onliner detail fetch failed for %s: %s", url, e)
         return result
 
-    soup = BeautifulSoup(html, "html.parser")
-
-    # Try to find area
-    area_match = re.search(r'(\d+(?:[.,]\d+)?)\s*м²', html)
-    if area_match:
+    # Try __NEXT_DATA__ first
+    next_match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
+    if next_match:
         try:
-            result["area"] = float(area_match.group(1).replace(",", "."))
-        except ValueError:
+            next_data = json.loads(next_match.group(1))
+            apt_data = next_data.get("props", {}).get("pageProps", {}).get("apartment", {})
+            if apt_data:
+                area = apt_data.get("area", {})
+                if isinstance(area, dict):
+                    result["area"] = area.get("total")
+                elif isinstance(area, (int, float)):
+                    result["area"] = float(area)
+        except (json.JSONDecodeError, KeyError):
             pass
 
+    # Fallback: regex for area in HTML
+    if result["area"] is None:
+        # Look for patterns like "35.6 м²" or "48 м²"
+        area_match = re.search(r'(\d+(?:[.,]\d+)?)\s*м[²2]', html)
+        if area_match:
+            try:
+                result["area"] = float(area_match.group(1).replace(",", "."))
+            except ValueError:
+                pass
+
+    # Get full text for keyword checks
+    text = re.sub(r'<[^>]+>', ' ', html).lower()
+
     # Check description for pet restrictions
-    text = soup.get_text(" ", strip=True).lower()
-    result["has_pet_restriction"] = any(kw in text for kw in PET_KEYWORDS)
+    result["has_pet_restriction"] = check_pets_in_text(text)
 
     # Check for dishwasher
-    result["has_dishwasher"] = "посудомоечн" in text
-
-    result["description"] = text[:500]
+    result["has_dishwasher"] = check_dishwasher_in_text(text)
 
     return result
 
@@ -75,9 +84,11 @@ async def scrape_onliner(session: aiohttp.ClientSession, max_pages: int = 3) -> 
             parts.append(f"page={page_num}")
             full_url = f"{SEARCH_URL}?{'&'.join(parts)}"
 
+            logger.info("Onliner URL: %s", full_url)
             async with session.get(full_url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
                 if resp.status != 200:
-                    logger.error("Onliner search returned %d", resp.status)
+                    body = await resp.text()
+                    logger.error("Onliner search returned %d: %s", resp.status, body[:500])
                     break
                 data = await resp.json(content_type=None)
         except Exception as e:

@@ -1,30 +1,15 @@
 import logging
 import re
-import json
 
 import aiohttp
 
 from models import Apartment
+from scrapers.common import PET_KEYWORDS, extract_next_data
 
 logger = logging.getLogger(__name__)
 
 LIST_URL = "https://realt.by/rent/flat-for-long/"
 DETAIL_URL_TEMPLATE = "https://realt.by/rent-flat-for-long/object/{code}/"
-
-PET_KEYWORDS = [
-    "без животных", "без питомцев", "без домашних животных",
-    "животные не допускаются", "без котов", "без кошек", "без собак",
-]
-
-
-def _extract_next_data(html: str) -> dict | None:
-    match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
-    if not match:
-        return None
-    try:
-        return json.loads(match.group(1))
-    except json.JSONDecodeError:
-        return None
 
 
 async def _get_listing_codes(session: aiohttp.ClientSession, max_pages: int = 3) -> list[str]:
@@ -69,7 +54,7 @@ async def _fetch_detail(session: aiohttp.ClientSession, code: str) -> Apartment 
         logger.warning("Realt detail fetch failed for %s: %s", code, e)
         return None
 
-    next_data = _extract_next_data(html)
+    next_data = extract_next_data(html)
     if not next_data:
         # Fallback: try to parse from page text
         return None
@@ -89,9 +74,6 @@ async def _fetch_detail(session: aiohttp.ClientSession, code: str) -> Apartment 
     price_byn = None
     price_usd = None
     price_rates = obj.get("priceRates") or {}
-    # Temporary debug: log all price-related fields
-    price_keys = {k: v for k, v in obj.items() if "price" in k.lower() or "cost" in k.lower() or "rate" in k.lower()}
-    logger.info("Realt %s price fields: %s", code, price_keys)
     if price_rates:
         raw_usd = price_rates.get("840") or price_rates.get(840) or price_rates.get("USD")
         raw_byn = price_rates.get("933") or price_rates.get(933) or price_rates.get("BYN")

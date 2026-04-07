@@ -1,12 +1,10 @@
 import logging
 import re
-import json
-from typing import AsyncIterator
 
 import aiohttp
-from bs4 import BeautifulSoup
 
 from models import Apartment
+from scrapers.common import check_pets_in_text, check_dishwasher_in_text, extract_next_data
 
 logger = logging.getLogger(__name__)
 
@@ -15,11 +13,6 @@ DETAIL_URL = "https://re.kufar.by/vi/{ad_id}"
 
 # Kufar kitchen appliance codes: 5 = dishwasher (посудомоечная машина)
 DISHWASHER_CODE = "5"
-
-PET_KEYWORDS = [
-    "без животных", "без питомцев", "без домашних животных",
-    "животные не допускаются", "без котов", "без кошек", "без собак",
-]
 
 
 def _get_param(ad: dict, key: str) -> str | None:
@@ -68,27 +61,7 @@ async def _fetch_detail(session: aiohttp.ClientSession, ad_id: str) -> dict | No
         logger.warning("Kufar detail fetch failed for %s: %s", ad_id, e)
         return None
 
-    # Extract __NEXT_DATA__
-    match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
-    if not match:
-        return None
-    try:
-        return json.loads(match.group(1))
-    except json.JSONDecodeError:
-        return None
-
-
-def _check_pets_in_text(text: str) -> bool:
-    if not text:
-        return False
-    lower = text.lower()
-    return any(kw in lower for kw in PET_KEYWORDS)
-
-
-def _check_dishwasher_in_text(text: str) -> bool:
-    if not text:
-        return False
-    return "посудомоечн" in text.lower()
+    return extract_next_data(html)
 
 
 async def scrape_kufar(session: aiohttp.ClientSession, max_pages: int = 3) -> list[Apartment]:
@@ -155,7 +128,11 @@ async def scrape_kufar(session: aiohttp.ClientSession, max_pages: int = 3) -> li
                     pass
 
             lat, lon = _parse_coords(ad)
-            address = ad.get("account_parameters", {}).get("address", None)
+            address = None
+            for ap in ad.get("account_parameters", []):
+                if isinstance(ap, dict) and ap.get("p") == "address":
+                    address = ap.get("v")
+                    break
             district = _get_param_label(ad, "re_district")
             is_owner = not ad.get("company_ad", False)
 
@@ -165,7 +142,7 @@ async def scrape_kufar(session: aiohttp.ClientSession, max_pages: int = 3) -> li
 
             # Check pets in short body
             body_short = ad.get("body_short", "") or ""
-            has_pet_restriction = _check_pets_in_text(body_short)
+            has_pet_restriction = check_pets_in_text(body_short)
 
             link = ad.get("ad_link", DETAIL_URL.format(ad_id=ad_id))
 
@@ -224,9 +201,9 @@ async def enrich_kufar_apartment(session: aiohttp.ClientSession, apt: Apartment)
         body = ad_data.get("body", "") or ""
         if body:
             apt.description = body
-            if _check_pets_in_text(body):
+            if check_pets_in_text(body):
                 apt.has_pet_restriction = True
-            if not apt.has_dishwasher and _check_dishwasher_in_text(body):
+            if not apt.has_dishwasher and check_dishwasher_in_text(body):
                 apt.has_dishwasher = True
 
         # Try to get address from detail if missing
