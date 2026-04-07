@@ -1,0 +1,180 @@
+import logging
+import re
+import json
+
+import aiohttp
+
+from models import Apartment
+
+logger = logging.getLogger(__name__)
+
+LIST_URL = "https://realt.by/rent/flat-for-long/"
+DETAIL_URL_TEMPLATE = "https://realt.by/rent-flat-for-long/object/{code}/"
+
+PET_KEYWORDS = [
+    "без животных", "без питомцев", "без домашних животных",
+    "животные не допускаются", "без котов", "без кошек", "без собак",
+]
+
+
+def _extract_next_data(html: str) -> dict | None:
+    match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
+    if not match:
+        return None
+    try:
+        return json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return None
+
+
+async def _get_listing_codes(session: aiohttp.ClientSession, max_pages: int = 3) -> list[str]:
+    """Collect listing codes from listing pages."""
+    codes = []
+    for page in range(1, max_pages + 1):
+        params = {"page": str(page)} if page > 1 else {}
+        try:
+            async with session.get(LIST_URL, params=params, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                if resp.status != 200:
+                    logger.error("Realt list page %d returned %d", page, resp.status)
+                    break
+                html = await resp.text()
+        except Exception as e:
+            logger.error("Realt list page failed: %s", e)
+            break
+
+        # Extract listing codes from links
+        found = re.findall(r'href="/rent-flat-for-long/object/(\d+)/"', html)
+        if not found:
+            break
+        codes.extend(found)
+
+    # Deduplicate preserving order
+    seen = set()
+    unique = []
+    for c in codes:
+        if c not in seen:
+            seen.add(c)
+            unique.append(c)
+    return unique
+
+
+async def _fetch_detail(session: aiohttp.ClientSession, code: str) -> Apartment | None:
+    url = DETAIL_URL_TEMPLATE.format(code=code)
+    try:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            if resp.status != 200:
+                return None
+            html = await resp.text()
+    except Exception as e:
+        logger.warning("Realt detail fetch failed for %s: %s", code, e)
+        return None
+
+    next_data = _extract_next_data(html)
+    if not next_data:
+        # Fallback: try to parse from page text
+        return None
+
+    try:
+        obj = next_data["props"]["pageProps"]["object"]
+    except (KeyError, TypeError):
+        return None
+
+    rooms = obj.get("rooms")
+    area = obj.get("areaTotal")
+    address = obj.get("address", "")
+    metro = obj.get("metroStationName")
+    district = metro if metro else None
+
+    # Price
+    price_byn = None
+    price_usd = None
+    price_rates = obj.get("priceRates", {})
+    if price_rates:
+        price_byn = price_rates.get("BYN")
+        price_usd = price_rates.get("USD")
+    # Fallback: priceFormatted
+    if price_byn is None:
+        raw_price = obj.get("priceFormatted", "")
+        match = re.search(r'([\d\s]+)\s*р', raw_price)
+        if match:
+            try:
+                price_byn = float(match.group(1).replace(" ", ""))
+            except ValueError:
+                pass
+
+    # Location
+    location = obj.get("location", [])
+    lon, lat = None, None
+    if isinstance(location, list) and len(location) == 2:
+        try:
+            lon, lat = float(location[0]), float(location[1])
+        except (ValueError, TypeError):
+            pass
+
+    # Appliances & dishwasher
+    appliances = obj.get("appliances", []) or []
+    has_dishwasher = any("посудомоечн" in a.lower() for a in appliances)
+
+    # Description & pet check
+    description = obj.get("description", "") or ""
+    # Strip HTML tags
+    clean_desc = re.sub(r'<[^>]+>', ' ', description)
+    has_pet_restriction = any(kw in clean_desc.lower() for kw in PET_KEYWORDS)
+
+    # Also check full page text for pet keywords if not found in description
+    if not has_pet_restriction:
+        full_text = re.sub(r'<[^>]+>', ' ', html[:50000]).lower()
+        has_pet_restriction = any(kw in full_text for kw in PET_KEYWORDS)
+
+    # Check dishwasher in full text too
+    if not has_dishwasher:
+        full_text_lower = html[:50000].lower()
+        # Check for dishwasher mention that's not crossed out
+        if "посудомоечн" in full_text_lower:
+            # Check it's not in a strikethrough/line-through context
+            # Simple heuristic: if "line-through" appears near "посудомоечн", it's crossed out
+            idx = full_text_lower.find("посудомоечн")
+            nearby = full_text_lower[max(0, idx - 200):idx + 50]
+            if "line-through" not in nearby and "<del>" not in nearby and "<s>" not in nearby:
+                has_dishwasher = True
+
+    is_owner = None
+    contact_name = obj.get("contactName", "")
+    # Agencies often have company-like names or specific markers
+    seller_type = obj.get("sellerType", "")
+    if seller_type:
+        is_owner = seller_type.lower() in ("собственник", "owner")
+
+    updated_at = obj.get("updatedAt") or obj.get("createdAt", "")
+
+    return Apartment(
+        source="realt",
+        external_id=str(code),
+        url=url,
+        rooms=rooms,
+        price_byn=price_byn,
+        price_usd=price_usd,
+        area=area,
+        address=address,
+        district=district,
+        is_owner=is_owner,
+        has_dishwasher=has_dishwasher,
+        has_pet_restriction=has_pet_restriction,
+        updated_at=updated_at,
+        lat=lat,
+        lon=lon,
+        description=clean_desc[:500] if clean_desc else None,
+    )
+
+
+async def scrape_realt(session: aiohttp.ClientSession, max_pages: int = 3) -> list[Apartment]:
+    codes = await _get_listing_codes(session, max_pages)
+    logger.info("Realt: found %d listing codes", len(codes))
+
+    apartments = []
+    for code in codes:
+        apt = await _fetch_detail(session, code)
+        if apt:
+            apartments.append(apt)
+
+    return apartments
