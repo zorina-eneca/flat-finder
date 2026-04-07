@@ -122,6 +122,8 @@ async def scrape_kufar(session: aiohttp.ClientSession, max_pages: int = 3) -> li
             break
 
         for ad in ads:
+            if not isinstance(ad, dict):
+                continue
             ad_id = str(ad.get("ad_id", ad.get("list_id", "")))
             if not ad_id:
                 continue

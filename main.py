@@ -5,6 +5,7 @@ import sys
 
 from dotenv import load_dotenv
 from telegram import InputMediaPhoto, Update
+from telegram.error import RetryAfter
 from telegram.ext import Application, CommandHandler, ContextTypes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -24,6 +25,7 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 scheduler = AsyncIOScheduler()
+_stop_sending = False
 
 
 async def send_results(app: Application):
@@ -44,12 +46,28 @@ async def send_results(app: Application):
 
     logger.info("Sending %d new apartments", len(apartments))
 
+    global _stop_sending
+    _stop_sending = False
     for apt in apartments:
+        if _stop_sending:
+            logger.info("Sending stopped by user")
+            break
         try:
             await _send_apartment(app.bot, CHAT_ID, apt)
-            await asyncio.sleep(0.5)
         except Exception as e:
             logger.error("Failed to send message: %s", e)
+        await asyncio.sleep(3)
+
+
+async def _send_with_retry(coro_func):
+    """Call an async function with retry on Telegram flood control."""
+    while True:
+        try:
+            return await coro_func()
+        except RetryAfter as e:
+            wait = e.retry_after + 1
+            logger.warning("Rate limited, waiting %d seconds...", wait)
+            await asyncio.sleep(wait)
 
 
 async def _send_apartment(bot, chat_id, apt):
@@ -62,18 +80,19 @@ async def _send_apartment(bot, chat_id, apt):
             else:
                 media.append(InputMediaPhoto(media=url))
         try:
-            await bot.send_media_group(chat_id=chat_id, media=media)
+            await _send_with_retry(lambda: bot.send_media_group(chat_id=chat_id, media=media))
             return
-        except Exception:
-            # Fallback to text if photos fail
-            pass
+        except RetryAfter:
+            raise  # Don't swallow rate limits
+        except Exception as e:
+            logger.warning("Photos failed, sending text only: %s", e)
 
-    await bot.send_message(
+    await _send_with_retry(lambda: bot.send_message(
         chat_id=chat_id,
         text=apt.format_message(),
         parse_mode="HTML",
         disable_web_page_preview=True,
-    )
+    ))
 
 
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -90,15 +109,25 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=chat_id, text="Новых подходящих квартир не найдено.")
         return
 
-    await context.bot.send_message(chat_id=chat_id, text=f"Найдено {len(apartments)} квартир:")
+    global _stop_sending
+    _stop_sending = False
+    await _send_with_retry(lambda: context.bot.send_message(
+        chat_id=chat_id, text=f"Найдено {len(apartments)} квартир:"))
+    sent = 0
     for apt in apartments:
+        if _stop_sending:
+            await _send_with_retry(lambda: context.bot.send_message(
+                chat_id=chat_id, text=f"⏹ Остановлено. Отправлено {sent} из {len(apartments)}."))
+            return
         try:
             await _send_apartment(context.bot, chat_id, apt)
-            await asyncio.sleep(0.5)
+            sent += 1
         except Exception as e:
             logger.error("Failed to send: %s", e)
+        await asyncio.sleep(3)
 
-    await context.bot.send_message(chat_id=chat_id, text="✅ Сканирование завершено.")
+    await _send_with_retry(lambda: context.bot.send_message(
+        chat_id=chat_id, text="✅ Сканирование завершено."))
 
 
 async def cmd_clear_seen(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -108,6 +137,26 @@ async def cmd_clear_seen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if seen_file.exists():
         seen_file.unlink()
     await update.message.reply_text("✅ История просмотренных объявлений очищена.")
+
+
+async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Stop sending and pause automatic scanning."""
+    global _stop_sending
+    _stop_sending = True
+    job = scheduler.get_job("scan_job")
+    if job:
+        scheduler.pause_job("scan_job")
+    await update.message.reply_text("⏸ Остановлено.\n/resume — возобновить автосканирование.")
+
+
+async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Resume automatic scanning."""
+    job = scheduler.get_job("scan_job")
+    if job:
+        scheduler.resume_job("scan_job")
+        await update.message.reply_text("▶️ Автосканирование возобновлено.")
+    else:
+        await update.message.reply_text("Задача сканирования не найдена.")
 
 
 async def post_init(app: Application):
@@ -137,6 +186,8 @@ def main():
     register_handlers(app)
     app.add_handler(CommandHandler("scan", cmd_scan))
     app.add_handler(CommandHandler("clear_seen", cmd_clear_seen))
+    app.add_handler(CommandHandler("stop", cmd_stop))
+    app.add_handler(CommandHandler("resume", cmd_resume))
 
     logger.info("Bot starting...")
     loop = asyncio.new_event_loop()

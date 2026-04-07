@@ -85,21 +85,25 @@ async def _fetch_detail(session: aiohttp.ClientSession, code: str) -> Apartment 
     metro = obj.get("metroStationName")
     district = metro if metro else None
 
-    # Price
+    # Price — priceRates uses ISO 4217 numeric codes: 840=USD, 933=BYN
     price_byn = None
     price_usd = None
-    price_rates = obj.get("priceRates", {})
+    price_rates = obj.get("priceRates") or {}
+    # Temporary debug: log all price-related fields
+    price_keys = {k: v for k, v in obj.items() if "price" in k.lower() or "cost" in k.lower() or "rate" in k.lower()}
+    logger.info("Realt %s price fields: %s", code, price_keys)
     if price_rates:
-        price_byn = price_rates.get("BYN")
-        price_usd = price_rates.get("USD")
-    # Fallback: priceFormatted
-    if price_byn is None:
-        raw_price = obj.get("priceFormatted", "")
-        match = re.search(r'([\d\s]+)\s*р', raw_price)
-        if match:
+        raw_usd = price_rates.get("840") or price_rates.get(840) or price_rates.get("USD")
+        raw_byn = price_rates.get("933") or price_rates.get(933) or price_rates.get("BYN")
+        if raw_usd is not None:
             try:
-                price_byn = float(match.group(1).replace(" ", ""))
-            except ValueError:
+                price_usd = float(raw_usd)
+            except (ValueError, TypeError):
+                pass
+        if raw_byn is not None:
+            try:
+                price_byn = float(raw_byn)
+            except (ValueError, TypeError):
                 pass
 
     # Location

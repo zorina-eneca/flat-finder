@@ -27,6 +27,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/set_owner on/off — только собственники\n"
         "/set_interval 30 — интервал сканирования (мин)\n"
         "/scan — запустить сканирование сейчас\n"
+        "/clear_seen — очистить историю найденных квартир\n"
+        "/stop — остановить автосканирование\n"
+        "/resume — возобновить автосканирование\n"
         "/help — эта справка",
         parse_mode="HTML",
     )

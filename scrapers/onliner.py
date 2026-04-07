@@ -33,6 +33,7 @@ async def _fetch_detail(session: aiohttp.ClientSession, url: str) -> dict:
     result = {"area": None, "description": None, "has_dishwasher": None, "has_pet_restriction": None}
     try:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            logger.info("Onliner detail %s returned %d", url, resp.status)
             if resp.status != 200:
                 return result
             html = await resp.text()
@@ -66,20 +67,13 @@ async def scrape_onliner(session: aiohttp.ClientSession, max_pages: int = 3) -> 
     apartments = []
 
     for page_num in range(1, max_pages + 1):
-        params = {
-            **BOUNDS,
-            "currency": "USD",
-            "page": str(page_num),
-        }
-        # Add all room types
-        for room_type in RENT_TYPE_MAP.values():
-            params.setdefault("rent_type[]", [])
-
         try:
-            # Build URL manually because aiohttp doesn't handle repeated params well
-            room_params = "&".join(f"rent_type[]={rt}" for rt in RENT_TYPE_MAP.values())
-            base_params = "&".join(f"{k}={v}" for k, v in params.items())
-            full_url = f"{SEARCH_URL}?{room_params}&{base_params}"
+            parts = [f"rent_type[]={rt}" for rt in RENT_TYPE_MAP.values()]
+            for k, v in BOUNDS.items():
+                parts.append(f"{k}={v}")
+            parts.append("currency=USD")
+            parts.append(f"page={page_num}")
+            full_url = f"{SEARCH_URL}?{'&'.join(parts)}"
 
             async with session.get(full_url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
                 if resp.status != 200:
