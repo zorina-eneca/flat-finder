@@ -7,8 +7,7 @@ from telegram.ext import (
     ContextTypes,
 )
 
-from config import Filters, load_filters, save_filters
-from models import Apartment
+from config import load_filters, save_filters
 
 logger = logging.getLogger(__name__)
 

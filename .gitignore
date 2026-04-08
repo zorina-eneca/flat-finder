@@ -11,8 +11,10 @@ __pycache__/
 *.pyo
 .venv/
 venv/
+.python-version
 
 # IDE
 .idea/
 .vscode/
 *.swp
+.claude/

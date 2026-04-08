@@ -25,7 +25,10 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 scheduler = AsyncIOScheduler()
-_stop_sending = False
+
+
+def _get_scan_tasks(app: Application) -> set[asyncio.Task[None]]:
+    return app.bot_data.setdefault("scan_tasks", set())
 
 
 async def send_results(app: Application):
@@ -34,29 +37,48 @@ async def send_results(app: Application):
         logger.warning("TELEGRAM_CHAT_ID not set, skipping send")
         return
 
+    scan_task = asyncio.current_task()
+    if scan_task is not None:
+        _get_scan_tasks(app).add(scan_task)
+
     try:
-        apartments = await run_scan()
+        count = 0
+
+        async for batch in run_scan():
+            if scan_task is not None and scan_task.cancelled():
+                logger.info("Sending stopped by task cancellation")
+                break
+            if not batch:
+                continue
+            if count == 0:
+                await _send_with_retry(lambda: app.bot.send_message(
+                    chat_id=CHAT_ID,
+                    text="Найдено новые квартиры:",
+                ))
+            for apt in batch:
+                if scan_task is not None and scan_task.cancelled():
+                    logger.info("Sending stopped by task cancellation")
+                    break
+                try:
+                    await _send_apartment(app.bot, CHAT_ID, apt)
+                    count += 1
+                except Exception as e:
+                    logger.error("Failed to send message: %s", e)
+                await asyncio.sleep(2)
+
+        if count == 0:
+            logger.info("No new apartments found")
+            return
+
+        logger.info("Sent %d new apartments", count)
+    except asyncio.CancelledError:
+        logger.info("Scan task cancelled")
+        return
     except Exception as e:
         logger.error("Scan failed: %s", e)
-        return
-
-    if not apartments:
-        logger.info("No new apartments found")
-        return
-
-    logger.info("Sending %d new apartments", len(apartments))
-
-    global _stop_sending
-    _stop_sending = False
-    for apt in apartments:
-        if _stop_sending:
-            logger.info("Sending stopped by user")
-            break
-        try:
-            await _send_apartment(app.bot, CHAT_ID, apt)
-        except Exception as e:
-            logger.error("Failed to send message: %s", e)
-        await asyncio.sleep(3)
+    finally:
+        if scan_task is not None:
+            _get_scan_tasks(app).discard(scan_task)
 
 
 async def _send_with_retry(coro_func):
@@ -73,21 +95,22 @@ async def _send_with_retry(coro_func):
 async def _send_apartment(bot, chat_id, apt):
     """Send one apartment: photos (if any) + text."""
     if apt.photos:
-        media = []
-        for i, url in enumerate(apt.photos[:5]):
-            if i == 0:
-                media.append(InputMediaPhoto(media=url, caption=apt.format_message(), parse_mode="HTML"))
-            else:
-                media.append(InputMediaPhoto(media=url))
-        try:
-            await _send_with_retry(lambda: bot.send_media_group(chat_id=chat_id, media=media))
-            return
-        except RetryAfter:
-            raise
-        except Exception as e:
-            logger.warning("Media group failed (%s), trying single photo...", e)
+        if len(apt.photos) > 1:
+            media = []
+            for i, url in enumerate(apt.photos[:5]):
+                if i == 0:
+                    media.append(InputMediaPhoto(media=url, caption=apt.format_message(), parse_mode="HTML"))
+                else:
+                    media.append(InputMediaPhoto(media=url))
+            try:
+                await _send_with_retry(lambda: bot.send_media_group(chat_id=chat_id, media=media))
+                return
+            except RetryAfter:
+                raise
+            except Exception as e:
+                logger.warning("Media group failed (%s), trying single photo...", e)
 
-        # Try sending photos one by one until one works
+        # Try sending a single photo if there is at least one photo
         for url in apt.photos[:5]:
             try:
                 await _send_with_retry(lambda u=url: bot.send_photo(
@@ -112,39 +135,71 @@ async def _send_apartment(bot, chat_id, apt):
     ))
 
 
+async def _perform_scan(bot, chat_id: int, app: Application):
+    """Perform the actual scan and send apartments to chat."""
+    scan_task = asyncio.current_task()
+    if scan_task is not None:
+        _get_scan_tasks(app).add(scan_task)
+
+    try:
+        sent = 0
+
+        async for batch in run_scan():
+            if scan_task is not None and scan_task.cancelled():
+                await _send_with_retry(lambda: bot.send_message(
+                    chat_id=chat_id,
+                    text=f"⏹ Остановлено. Отправлено {sent} квартир.",
+                ))
+                return
+            if not batch:
+                continue
+            if sent == 0:
+                await _send_with_retry(lambda: bot.send_message(chat_id=chat_id, text="Найдено новые квартиры:"))
+            for apt in batch:
+                if scan_task is not None and scan_task.cancelled():
+                    await _send_with_retry(lambda: bot.send_message(
+                        chat_id=chat_id,
+                        text=f"⏹ Остановлено. Отправлено {sent} квартир.",
+                    ))
+                    return
+                try:
+                    await _send_apartment(bot, chat_id, apt)
+                    sent += 1
+                except Exception as e:
+                    logger.error("Failed to send: %s", e)
+                await asyncio.sleep(3)
+
+        if sent == 0:
+            await bot.send_message(chat_id=chat_id, text="Новых подходящих квартир не найдено.")
+            return
+    except asyncio.CancelledError:
+        await _send_with_retry(lambda: bot.send_message(
+            chat_id=chat_id,
+            text=f"⏹ Сканирование отменено. Отправлено {sent} квартир.",
+        ))
+        return
+    except Exception as e:
+        await bot.send_message(chat_id=chat_id, text=f"❌ Ошибка: {e}")
+        return
+    finally:
+        if scan_task is not None:
+            _get_scan_tasks(app).discard(scan_task)
+
+    await _send_with_retry(lambda: bot.send_message(
+        chat_id=chat_id,
+        text="✅ Сканирование завершено.",
+    ))
+
+
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manual scan trigger."""
+    """Manual scan trigger (background task)."""
     chat_id = update.effective_chat.id
     await context.bot.send_message(chat_id=chat_id, text="🔍 Запускаю сканирование...")
-    try:
-        apartments = await run_scan()
-    except Exception as e:
-        await context.bot.send_message(chat_id=chat_id, text=f"❌ Ошибка: {e}")
-        return
-
-    if not apartments:
-        await context.bot.send_message(chat_id=chat_id, text="Новых подходящих квартир не найдено.")
-        return
-
-    global _stop_sending
-    _stop_sending = False
-    await _send_with_retry(lambda: context.bot.send_message(
-        chat_id=chat_id, text=f"Найдено {len(apartments)} квартир:"))
-    sent = 0
-    for apt in apartments:
-        if _stop_sending:
-            await _send_with_retry(lambda: context.bot.send_message(
-                chat_id=chat_id, text=f"⏹ Остановлено. Отправлено {sent} из {len(apartments)}."))
-            return
-        try:
-            await _send_apartment(context.bot, chat_id, apt)
-            sent += 1
-        except Exception as e:
-            logger.error("Failed to send: %s", e)
-        await asyncio.sleep(3)
-
-    await _send_with_retry(lambda: context.bot.send_message(
-        chat_id=chat_id, text="✅ Сканирование завершено."))
+    # Schedule scan as a background task so other commands can be processed
+    context.application.create_task(
+        _perform_scan(context.bot, chat_id, context.application),
+        update=update,
+    )
 
 
 async def cmd_clear_seen(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -157,13 +212,23 @@ async def cmd_clear_seen(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Stop sending and pause automatic scanning."""
-    global _stop_sending
-    _stop_sending = True
+    """Stop sending and cancel active scan tasks."""
+    tasks = list(_get_scan_tasks(context.application))
+    for task in tasks:
+        task.cancel()
+
     job = scheduler.get_job("scan_job")
     if job:
         scheduler.pause_job("scan_job")
-    await update.message.reply_text("⏸ Остановлено.\n/resume — возобновить автосканирование.")
+
+    if tasks:
+        await update.message.reply_text(
+            "⏸ Остановлено. Текущее сканирование отменено.\n/resume — возобновить автосканирование.",
+        )
+    else:
+        await update.message.reply_text(
+            "⏸ Остановлено.\n/resume — возобновить автосканирование.",
+        )
 
 
 async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -195,7 +260,7 @@ async def post_init(app: Application):
 
 def main():
     if not BOT_TOKEN:
-        print("Error: TELEGRAM_BOT_TOKEN not set in .env")
+        logger.error("Error: TELEGRAM_BOT_TOKEN not set in .env")
         sys.exit(1)
 
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
