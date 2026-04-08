@@ -83,9 +83,26 @@ async def _send_apartment(bot, chat_id, apt):
             await _send_with_retry(lambda: bot.send_media_group(chat_id=chat_id, media=media))
             return
         except RetryAfter:
-            raise  # Don't swallow rate limits
+            raise
         except Exception as e:
-            logger.warning("Photos failed, sending text only: %s", e)
+            logger.warning("Media group failed (%s), trying single photo...", e)
+
+        # Try sending photos one by one until one works
+        for url in apt.photos[:5]:
+            try:
+                await _send_with_retry(lambda u=url: bot.send_photo(
+                    chat_id=chat_id,
+                    photo=u,
+                    caption=apt.format_message(),
+                    parse_mode="HTML",
+                ))
+                return
+            except RetryAfter:
+                raise
+            except Exception as e:
+                logger.warning("Single photo %s failed: %s", url, e)
+                continue
+        logger.warning("All photos failed, sending text only")
 
     await _send_with_retry(lambda: bot.send_message(
         chat_id=chat_id,
