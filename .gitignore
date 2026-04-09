@@ -2,8 +2,7 @@
 .env
 
 # Runtime data
-seen_ads.json
-user_config.json
+data/
 
 # Python
 __pycache__/

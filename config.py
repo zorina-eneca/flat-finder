@@ -3,7 +3,7 @@ import os
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
-CONFIG_PATH = Path(__file__).parent / "user_config.json"
+CONFIG_PATH = Path(__file__).parent / "data" / "user_config.json"
 
 
 @dataclass
@@ -44,6 +44,7 @@ def load_filters() -> Filters:
 
 
 def save_filters(filters: Filters):
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     CONFIG_PATH.write_text(
         json.dumps(asdict(filters), ensure_ascii=False, indent=2),
         encoding="utf-8",

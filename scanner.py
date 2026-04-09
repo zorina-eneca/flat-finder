@@ -14,7 +14,7 @@ from scrapers.realt import scrape_realt
 
 logger = logging.getLogger(__name__)
 
-SEEN_FILE = Path(__file__).parent / "seen_ads.json"
+SEEN_FILE = Path(__file__).parent / "data" / "seen_ads.json"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -33,6 +33,7 @@ def _load_seen() -> set[str]:
 
 
 def _save_seen(seen: set[str]):
+    SEEN_FILE.parent.mkdir(parents=True, exist_ok=True)
     SEEN_FILE.write_text(
         json.dumps(list(seen), ensure_ascii=False),
         encoding="utf-8",

@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  flat-finder-bot:
+    image: flat-finder:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: flat-finder-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "1"

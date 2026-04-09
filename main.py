@@ -103,25 +103,32 @@ async def _send_apartment(bot, chat_id, apt):
                 else:
                     media.append(InputMediaPhoto(media=url))
             try:
-                await _send_with_retry(lambda: bot.send_media_group(chat_id=chat_id, media=media))
+                await asyncio.wait_for(
+                    _send_with_retry(lambda: bot.send_media_group(chat_id=chat_id, media=media)),
+                    timeout=45.0,
+                )
                 return
-            except RetryAfter:
-                raise
+            except (asyncio.TimeoutError, RetryAfter):
+                logger.warning("Media group timeout or rate limit, trying single photo...")
             except Exception as e:
                 logger.warning("Media group failed (%s), trying single photo...", e)
 
         # Try sending a single photo if there is at least one photo
         for url in apt.photos[:5]:
             try:
-                await _send_with_retry(lambda u=url: bot.send_photo(
-                    chat_id=chat_id,
-                    photo=u,
-                    caption=apt.format_message(),
-                    parse_mode="HTML",
-                ))
+                await asyncio.wait_for(
+                    _send_with_retry(lambda u=url: bot.send_photo(
+                        chat_id=chat_id,
+                        photo=u,
+                        caption=apt.format_message(),
+                        parse_mode="HTML",
+                    )),
+                    timeout=30.0,
+                )
                 return
-            except RetryAfter:
-                raise
+            except (asyncio.TimeoutError, RetryAfter):
+                logger.warning("Single photo timeout for %s, trying next", url)
+                continue
             except Exception as e:
                 logger.warning("Single photo %s failed: %s", url, e)
                 continue
@@ -205,7 +212,7 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_clear_seen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Clear seen ads history."""
     from pathlib import Path
-    seen_file = Path(__file__).parent / "seen_ads.json"
+    seen_file = Path(__file__).parent / "data" / "seen_ads.json"
     if seen_file.exists():
         seen_file.unlink()
     await update.message.reply_text("✅ История просмотренных объявлений очищена.")
@@ -263,7 +270,7 @@ def main():
         logger.error("Error: TELEGRAM_BOT_TOKEN not set in .env")
         sys.exit(1)
 
-    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).write_timeout(30).read_timeout(20).connect_timeout(20).build()
 
     register_handlers(app)
     app.add_handler(CommandHandler("scan", cmd_scan))
