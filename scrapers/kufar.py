@@ -11,8 +11,11 @@ logger = logging.getLogger(__name__)
 SEARCH_URL = "https://api.kufar.by/search-api/v1/search/rendered-paginated"
 DETAIL_URL = "https://re.kufar.by/vi/{ad_id}"
 
-# Kufar kitchen appliance codes: 5 = dishwasher (посудомоечная машина)
-DISHWASHER_CODE = "5"
+# Kufar kitchen appliance codes for dishwasher (посудомоечная машина)
+# Search API uses code 5, detail page uses code 3
+DISHWASHER_CODE_SEARCH = "5"
+DISHWASHER_CODE_DETAIL = "3"
+DISHWASHER_CODES = {DISHWASHER_CODE_SEARCH, DISHWASHER_CODE_DETAIL}
 
 
 def _get_param(ad: dict, key: str) -> str | None:
@@ -138,7 +141,7 @@ async def scrape_kufar(session: aiohttp.ClientSession, max_pages: int = 3) -> li
 
             # Check dishwasher from kitchen params
             kitchen_items = _get_param_list(ad, "flat_kitchen")
-            has_dishwasher = DISHWASHER_CODE in kitchen_items
+            has_dishwasher = bool(DISHWASHER_CODES & set(kitchen_items))
 
             # Check pets in short body
             body_short = ad.get("body_short", "") or ""
@@ -193,10 +196,31 @@ async def enrich_kufar_apartment(session: aiohttp.ClientSession, apt: Apartment)
         return apt
 
     try:
-        props = next_data.get("props", {}).get("pageProps", {})
-        ad_data = props.get("adData", props.get("ad", {}))
+        # Kufar moved ad data from pageProps.adData to initialState.adView.data
+        ad_data = (
+            next_data.get("props", {})
+            .get("initialState", {})
+            .get("adView", {})
+            .get("data", {})
+        )
+        if not ad_data:
+            # Fallback to old structure
+            props = next_data.get("props", {}).get("pageProps", {})
+            ad_data = props.get("adData", props.get("ad", {}))
         if not ad_data:
             return apt
+
+        # Re-check dishwasher from detail page ad_parameters
+        # Detail page stores params in ad_data.initial.ad_parameters
+        detail_params = ad_data.get("initial", {}).get("ad_parameters", [])
+        if not apt.has_dishwasher:
+            for p in detail_params:
+                if p.get("p") == "flat_kitchen":
+                    v = p.get("v")
+                    items = [str(x) for x in v] if isinstance(v, list) else ([str(v)] if v is not None else [])
+                    if DISHWASHER_CODES & set(items):
+                        apt.has_dishwasher = True
+                    break
 
         body = ad_data.get("body", "") or ""
         if body:
@@ -208,10 +232,14 @@ async def enrich_kufar_apartment(session: aiohttp.ClientSession, apt: Apartment)
 
         # Try to get address from detail if missing
         if not apt.address:
-            for p in ad_data.get("ad_parameters", []):
-                if p.get("p") == "address":
-                    apt.address = p.get("v")
-                    break
+            addr = ad_data.get("address") or ad_data.get("addressWithDistrict")
+            if addr:
+                apt.address = addr
+            else:
+                for p in detail_params:
+                    if p.get("p") == "address":
+                        apt.address = p.get("v")
+                        break
     except Exception as e:
         logger.warning("Kufar detail parse error for %s: %s", apt.external_id, e)
 

@@ -3,6 +3,8 @@
 
 # Runtime data
 data/
+seen_ads.json
+user_config.json
 
 # Python
 __pycache__/

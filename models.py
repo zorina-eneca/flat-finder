@@ -67,9 +67,9 @@ class Apartment:
 
         dishwasher = "н/д"
         if self.has_dishwasher is True:
-            dishwasher = "✅ есть"
+            dishwasher = "✅ #посудомойка_есть"
         elif self.has_dishwasher is False:
-            dishwasher = "❌ нет"
+            dishwasher = "❌ #посудомойки_нет"
 
         return (
             f"🏠 <b>{rooms_str}</b>\n"
@@ -79,4 +79,5 @@ class Apartment:
             f"🕐 Обновлено: {self.updated_at_formatted}\n"
             f"🍽 Посудомойка: {dishwasher}\n"
             f"\n🔗 {self.source.capitalize()}: <a href=\"{self.url}\">Открыть объявление</a>"
+            f"\n#{self.source}_{self.external_id}"
         )
