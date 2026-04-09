@@ -80,4 +80,5 @@ class Apartment:
             f"🍽 Посудомойка: {dishwasher}\n"
             f"\n🔗 {self.source.capitalize()}: <a href=\"{self.url}\">Открыть объявление</a>"
             f"\n#{self.source}_{self.external_id}"
+            + ("\n\n@zoraleta @aksnickolas" if self.has_dishwasher else "")
         )
