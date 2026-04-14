@@ -1,3 +1,4 @@
+from typing import AsyncGenerator
 import logging
 import re
 import json
@@ -72,8 +73,7 @@ async def _fetch_detail(session: aiohttp.ClientSession, url: str) -> dict:
     return result
 
 
-async def scrape_onliner(session: aiohttp.ClientSession, max_pages: int = 3) -> list[Apartment]:
-    apartments = []
+async def scrape_onliner(session: aiohttp.ClientSession, max_pages: int = 3) -> AsyncGenerator[Apartment, None]:
 
     for page_num in range(1, max_pages + 1):
         try:
@@ -165,14 +165,12 @@ async def scrape_onliner(session: aiohttp.ClientSession, max_pages: int = 3) -> 
                 lon=lon,
                 photos=photos,
             )
-            apartments.append(apt)
+            yield apt
 
         # Check pagination
         page_info = data.get("page", {})
         if page_num >= page_info.get("last", 1):
             break
-
-    return apartments
 
 
 async def enrich_onliner_apartment(session: aiohttp.ClientSession, apt: Apartment) -> Apartment:

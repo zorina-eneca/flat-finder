@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import AsyncGenerator
 
 import aiohttp
+from aiostream import stream
+
 
 from config import load_filters
 from models import Apartment
@@ -44,70 +46,76 @@ async def run_scan(batch_size: int = 5) -> AsyncGenerator[list[Apartment], None]
     """Run full scan across all sources and yield new matching apartment batches."""
     filters = load_filters()
     seen = _load_seen()
-    all_apartments: list[Apartment] = []
 
     try:
         connector = aiohttp.TCPConnector(limit=5)
         async with aiohttp.ClientSession(headers=HEADERS, connector=connector) as session:
-            # Scrape all sources concurrently
-            results = await asyncio.gather(
-                scrape_kufar(session, max_pages=3),
-                scrape_onliner(session, max_pages=3),
-                scrape_realt(session, max_pages=2),
-                return_exceptions=True,
+            kufar_gen = scrape_kufar(session, max_pages=3)
+            onliner_gen = scrape_onliner(session, max_pages=3)
+            realt_gen = scrape_realt(session, max_pages=2)
+            appartment_parser = stream.merge(
+                kufar_gen,
+                onliner_gen,
+                realt_gen
             )
-
-            for i, result in enumerate(results):
-                source_name = ("kufar", "onliner", "realt")[i]
-                if isinstance(result, Exception):
-                    logger.error("Scraper %s failed: %s", source_name, result)
-                    continue
-                logger.info("Scraped %d apartments from %s", len(result), source_name)
-                all_apartments.extend(result)
-
-            # Filter out already seen
-            new_apartments = [a for a in all_apartments if a.unique_key not in seen]
-            logger.info("New apartments: %d (total scraped: %d)", len(new_apartments), len(all_apartments))
-
             batch: list[Apartment] = []
-            for apt in new_apartments:
-                # Quick filter before spending time on detail pages
-                if filters.rooms and apt.rooms and apt.rooms not in filters.rooms:
-                    seen.add(apt.unique_key)
-                    continue
-                if apt.price_usd is not None:
-                    if apt.price_usd < filters.price_min_usd:
-                        seen.add(apt.unique_key)
+
+            # Read from 3 parsers whichever if first, collect in batches, yield further
+            async with appartment_parser.stream() as parser:
+                async for result in parser:
+                    if isinstance(result, Exception):
+                        logger.error("Scraper failed: %s", result)
                         continue
-                    if filters.price_max_usd is not None and apt.price_usd > filters.price_max_usd:
-                        seen.add(apt.unique_key)
+                    # Filter out already seen
+                    if result.unique_key in seen:
+                        logger.debug("Already seen apartment %s, skipping", result.unique_key)
                         continue
-                if filters.only_owner and apt.is_owner is False:
-                    seen.add(apt.unique_key)
-                    continue
+                    else:
+                        seen.add(result.unique_key)
+                    logger.info("Scraped apartment from %s", result.source)
 
-                # Enrich with detail page
-                try:
-                    if apt.source == "kufar":
-                        apt = await enrich_kufar_apartment(session, apt)
-                    elif apt.source == "onliner":
-                        apt = await enrich_onliner_apartment(session, apt)
-                    # realt is already enriched from detail page
-                except Exception as e:
-                    logger.warning("Enrichment failed for %s: %s", apt.unique_key, e)
+                    # Quick filter before spending time on detail pages
+                    if filters.rooms and result.rooms and result.rooms not in filters.rooms:
+                        logger.debug("Apartment %s does not match room filter, skipping", result.unique_key)
+                        continue
+                    if result.price_usd is not None:
+                        if result.price_usd < filters.price_min_usd:
+                            logger.debug("Apartment %s is below price minimum, skipping", result.unique_key)
+                            continue
+                        if filters.price_max_usd is not None and result.price_usd > filters.price_max_usd:
+                            logger.debug("Apartment %s is above price maximum, skipping", result.unique_key)
+                            continue
+                    if filters.only_owner and result.is_owner is False:
+                        logger.debug("Apartment %s is not owned by owner, skipping", result.unique_key)
+                        continue
 
-                if filters.matches(apt):
-                    batch.append(apt)
+                    # Enrich with detail page
+                    try:
+                        if result.source == "kufar":
+                            logger.info("Enriching Kufar apartment %s", result.unique_key)
+                            result = await enrich_kufar_apartment(session, result)
+                        elif result.source == "onliner":
+                            logger.info("Enriching Onliner apartment %s", result.unique_key)
+                            result = await enrich_onliner_apartment(session, result)
+                        # realt is already enriched from detail page
+                    except Exception as e:
+                        logger.warning("Enrichment failed for %s: %s", result.unique_key, e)
 
-                seen.add(apt.unique_key)
-                if len(batch) >= batch_size:
+                    if filters.matches(result):
+                        logger.info("Apartment %s matches filters, adding to batch, batch size: %d", result.unique_key, len(batch))
+                        batch.append(result)
+                        
+
+                    if len(batch) >= batch_size:
+                        logger.info("Yielding batch of %d apartments", len(batch))
+                        yield batch
+                        batch = []
+
+                    # Small delay to be polite
+                    await asyncio.sleep(0.3)
+
+                if batch:
+                    logger.info("Yielding final batch of %d apartments", len(batch))
                     yield batch
-                    batch = []
-
-                # Small delay to be polite
-                await asyncio.sleep(0.3)
-
-            if batch:
-                yield batch
     finally:
         _save_seen(seen)

@@ -1,5 +1,5 @@
+from typing import AsyncGenerator
 import logging
-import re
 
 import aiohttp
 
@@ -67,11 +67,10 @@ async def _fetch_detail(session: aiohttp.ClientSession, ad_id: str) -> dict | No
     return extract_next_data(html)
 
 
-async def scrape_kufar(session: aiohttp.ClientSession, max_pages: int = 3) -> list[Apartment]:
-    apartments = []
+async def scrape_kufar(session: aiohttp.ClientSession, max_pages: int = 3) -> AsyncGenerator[Apartment, None]:
     cursor = None
 
-    for page in range(max_pages):
+    for _ in range(max_pages):
         params = {
             "cat": "1010",
             "typ": "let",
@@ -175,7 +174,7 @@ async def scrape_kufar(session: aiohttp.ClientSession, max_pages: int = 3) -> li
                 description=body_short,
                 photos=photos,
             )
-            apartments.append(apt)
+            yield apt
 
         # Pagination
         pagination = data.get("pagination", {})
@@ -186,14 +185,12 @@ async def scrape_kufar(session: aiohttp.ClientSession, max_pages: int = 3) -> li
         else:
             break
 
-    return apartments
-
-
 async def enrich_kufar_apartment(session: aiohttp.ClientSession, apt: Apartment) -> Apartment:
     """Fetch detail page to get full description, check pets and dishwasher more thoroughly."""
     next_data = await _fetch_detail(session, apt.external_id)
     if not next_data:
         return apt
+
 
     try:
         # Kufar moved ad data from pageProps.adData to initialState.adView.data

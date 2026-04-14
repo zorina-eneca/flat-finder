@@ -3,3 +3,4 @@ aiohttp==3.10.11
 beautifulsoup4==4.12.3
 apscheduler==3.10.4
 python-dotenv==1.0.1
+aiostream==0.7.1

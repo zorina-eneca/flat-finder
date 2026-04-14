@@ -1,5 +1,6 @@
 import logging
 import re
+from typing import AsyncGenerator
 
 import aiohttp
 
@@ -12,9 +13,9 @@ LIST_URL = "https://realt.by/rent/flat-for-long/"
 DETAIL_URL_TEMPLATE = "https://realt.by/rent-flat-for-long/object/{code}/"
 
 
-async def _get_listing_codes(session: aiohttp.ClientSession, max_pages: int = 3) -> list[str]:
+async def _get_listing_codes(session: aiohttp.ClientSession, max_pages: int = 3) -> set[str]:
     """Collect listing codes from listing pages."""
-    codes = []
+    codes = set()
     for page in range(1, max_pages + 1):
         params = {"page": str(page)} if page > 1 else {}
         try:
@@ -31,16 +32,10 @@ async def _get_listing_codes(session: aiohttp.ClientSession, max_pages: int = 3)
         found = re.findall(r'href="/rent-flat-for-long/object/(\d+)/"', html)
         if not found:
             break
-        codes.extend(found)
-
-    # Deduplicate preserving order
-    seen = set()
-    unique = []
-    for c in codes:
-        if c not in seen:
-            seen.add(c)
-            unique.append(c)
-    return unique
+        for item in found:
+            if item not in codes:
+                codes.add(item)
+                yield item
 
 
 async def _fetch_detail(session: aiohttp.ClientSession, code: str) -> Apartment | None:
@@ -162,14 +157,8 @@ async def _fetch_detail(session: aiohttp.ClientSession, code: str) -> Apartment 
     )
 
 
-async def scrape_realt(session: aiohttp.ClientSession, max_pages: int = 3) -> list[Apartment]:
-    codes = await _get_listing_codes(session, max_pages)
-    logger.info("Realt: found %d listing codes", len(codes))
-
-    apartments = []
-    for code in codes:
+async def scrape_realt(session: aiohttp.ClientSession, max_pages: int = 3) -> AsyncGenerator[Apartment, None]:
+    async for code in _get_listing_codes(session, max_pages):
         apt = await _fetch_detail(session, code)
         if apt:
-            apartments.append(apt)
-
-    return apartments
+            yield apt

@@ -5,7 +5,7 @@ from typing import Optional
 MINSK_TZ = timezone(timedelta(hours=3))
 
 
-@dataclass
+@dataclass(slots=True)
 class Apartment:
     source: str  # kufar, onliner, realt
     external_id: str
