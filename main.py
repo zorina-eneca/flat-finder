@@ -4,6 +4,7 @@ import os
 import sys
 
 from dotenv import load_dotenv
+from aiolimiter import AsyncLimiter
 from telegram import InputMediaPhoto, Update
 from telegram.error import RetryAfter
 from telegram.ext import Application, CommandHandler, ContextTypes
@@ -151,6 +152,7 @@ async def _perform_scan(bot, chat_id: int, app: Application):
     try:
         sent = 0
 
+        rate_limiter = AsyncLimiter(25, 1)
         async for batch in run_scan():
             if scan_task is not None and scan_task.cancelled():
                 await _send_with_retry(lambda: bot.send_message(
@@ -170,11 +172,11 @@ async def _perform_scan(bot, chat_id: int, app: Application):
                     ))
                     return
                 try:
-                    await _send_apartment(bot, chat_id, apt)
+                    async with rate_limiter:
+                        await _send_apartment(bot, chat_id, apt)
                     sent += 1
                 except Exception as e:
                     logger.error("Failed to send: %s", e)
-                await asyncio.sleep(3)
 
         if sent == 0:
             await bot.send_message(chat_id=chat_id, text="Новых подходящих квартир не найдено.")
