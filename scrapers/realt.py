@@ -5,7 +5,7 @@ from typing import AsyncGenerator
 import aiohttp
 
 from models import Apartment
-from scrapers.common import PET_KEYWORDS, extract_next_data
+from scrapers.common import extract_next_data, check_pets_in_text
 
 logger = logging.getLogger(__name__)
 
@@ -13,7 +13,7 @@ LIST_URL = "https://realt.by/rent/flat-for-long/"
 DETAIL_URL_TEMPLATE = "https://realt.by/rent-flat-for-long/object/{code}/"
 
 
-async def _get_listing_codes(session: aiohttp.ClientSession, max_pages: int = 3) -> set[str]:
+async def _get_listing_codes(session: aiohttp.ClientSession, max_pages: int = 3) -> AsyncGenerator[str, None]:
     """Collect listing codes from listing pages."""
     codes = set()
     for page in range(1, max_pages + 1):
@@ -97,34 +97,13 @@ async def _fetch_detail(session: aiohttp.ClientSession, code: str) -> Apartment 
     has_dishwasher = any("посудомоечн" in a.lower() for a in appliances)
 
     # Description & pet check
-    description = obj.get("description", "") or ""
-    # Strip HTML tags
-    clean_desc = re.sub(r'<[^>]+>', ' ', description)
-    has_pet_restriction = any(kw in clean_desc.lower() for kw in PET_KEYWORDS)
+    description = obj.get("headline") or obj.get("description", "")
+    description = re.sub(r'<[^>]+>', ' ', description)
+    # Strip HTML tags for storage, but pass raw to check_pets_in_text
+    has_pet_restriction = check_pets_in_text(description)
 
-    # Also check full page text for pet keywords if not found in description
-    if not has_pet_restriction:
-        full_text = re.sub(r'<[^>]+>', ' ', html[:50000]).lower()
-        has_pet_restriction = any(kw in full_text for kw in PET_KEYWORDS)
-
-    # Check dishwasher in full text too
-    if not has_dishwasher:
-        full_text_lower = html[:50000].lower()
-        # Check for dishwasher mention that's not crossed out
-        if "посудомоечн" in full_text_lower:
-            # Check it's not in a strikethrough/line-through context
-            # Simple heuristic: if "line-through" appears near "посудомоечн", it's crossed out
-            idx = full_text_lower.find("посудомоечн")
-            nearby = full_text_lower[max(0, idx - 200):idx + 50]
-            if "line-through" not in nearby and "<del>" not in nearby and "<s>" not in nearby:
-                has_dishwasher = True
-
-    is_owner = None
-    contact_name = obj.get("contactName", "")
+    is_owner = False if obj.get("agencyUuid") is not None else True
     # Agencies often have company-like names or specific markers
-    seller_type = obj.get("sellerType", "")
-    if seller_type:
-        is_owner = seller_type.lower() in ("собственник", "owner")
 
     updated_at = obj.get("updatedAt") or obj.get("createdAt", "")
 
@@ -152,7 +131,7 @@ async def _fetch_detail(session: aiohttp.ClientSession, code: str) -> Apartment 
         updated_at=updated_at,
         lat=lat,
         lon=lon,
-        description=clean_desc[:500] if clean_desc else None,
+        description=description[:500] if description else None,
         photos=photos,
     )
 

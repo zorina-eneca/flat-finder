@@ -1,12 +1,12 @@
 from typing import AsyncGenerator
 import logging
 import re
-import json
+from lxml import html
 
 import aiohttp
 
 from models import Apartment
-from scrapers.common import check_pets_in_text, check_dishwasher_in_text
+from scrapers.common import check_pets_in_text, check_dishwasher_in_text, extract_next_data
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +22,39 @@ BOUNDS = {
 
 RENT_TYPE_MAP = {1: "1_room", 2: "2_rooms", 3: "3_rooms", 4: "4_rooms"}
 
+def _extract_description(tree: html.HtmlElement) -> str | None:
+    description_path = './/div[@class="apartment-info__line"]//div[@class="apartment-info__sub-line apartment-info__sub-line_extended-bottom"]'
+    description_element = tree.xpath(description_path)
+    if description_element:
+        description = " ".join(description_element[0].text_content().split())
+        if not description:
+            return None
+        description = re.sub(r'<[^>]+>', ' ', description).lower()
+    return description if description else None
+
+def _extract_area(description: str) -> float | None:
+    # Pattern for the number + Russian area variations
+    area_pattern = r'(\d+(?:[.,]\d+)?)\s*(?:м[²2]|м\.?\s*кв\.?|кв\.?\s*м\.?)'
+
+    if description is None:
+        return None
+
+    # findall returns a list of the first capturing group: the numbers
+    all_matches = re.findall(area_pattern, description, re.IGNORECASE)
+    
+    if not all_matches:
+        return None
+
+    areas = []
+    for val in all_matches:
+        try:
+            # Convert "62,5" to 62.5 and add to list
+            areas.append(float(val.replace(",", ".")))
+        except ValueError:
+            continue
+            
+    return max(areas) if areas else None
+
 
 async def _fetch_detail(session: aiohttp.ClientSession, url: str) -> dict:
     """Fetch detail page and extract area, description, dishwasher info."""
@@ -31,44 +64,22 @@ async def _fetch_detail(session: aiohttp.ClientSession, url: str) -> dict:
             if resp.status != 200:
                 logger.warning("Onliner detail %s returned %d", url, resp.status)
                 return result
-            html = await resp.text()
+            tree = html.fromstring(await resp.text())
     except Exception as e:
         logger.warning("Onliner detail fetch failed for %s: %s", url, e)
         return result
 
-    # Try __NEXT_DATA__ first
-    next_match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
-    if next_match:
-        try:
-            next_data = json.loads(next_match.group(1))
-            apt_data = next_data.get("props", {}).get("pageProps", {}).get("apartment", {})
-            if apt_data:
-                area = apt_data.get("area", {})
-                if isinstance(area, dict):
-                    result["area"] = area.get("total")
-                elif isinstance(area, (int, float)):
-                    result["area"] = float(area)
-        except (json.JSONDecodeError, KeyError):
-            pass
+    description = _extract_description(tree)
+    result["description"] = description
 
-    # Fallback: regex for area in HTML
-    if result["area"] is None:
-        # Look for patterns like "35.6 м²" or "48 м²"
-        area_match = re.search(r'(\d+(?:[.,]\d+)?)\s*м[²2]', html)
-        if area_match:
-            try:
-                result["area"] = float(area_match.group(1).replace(",", "."))
-            except ValueError:
-                pass
-
-    # Get full text for keyword checks
-    text = re.sub(r'<[^>]+>', ' ', html).lower()
+    # Extract area from description using regex
+    result["area"] = _extract_area(description)
 
     # Check description for pet restrictions
-    result["has_pet_restriction"] = check_pets_in_text(text)
+    result["has_pet_restriction"] = check_pets_in_text(description)
 
     # Check for dishwasher
-    result["has_dishwasher"] = check_dishwasher_in_text(text)
+    result["has_dishwasher"] = check_dishwasher_in_text(description)
 
     return result
 
